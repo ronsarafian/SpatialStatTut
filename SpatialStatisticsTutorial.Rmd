@@ -1,0 +1,923 @@
+---
+title: |
+  | Spatial Statistics With R
+  | Tutorial
+author: "Ron Sarafian"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+This document provides a an introduction to applied spatial statistics. 
+It is based mostly on the second edition of the book: [Applied Spatial Data Analysis with R][1]
+and on the [Harvard Workshop: Applied Spatial Statistics in R][2]
+
+[1]: http://www.asdar-book.org/
+[2]: http://www.people.fas.harvard.edu/~zhukov/spatial.html
+
+
+# Handling Spatial Data in R
+
+## Classes for spatial data
+
+We use the following R Packages:
+```{r, message = F, warning = F}
+#install.packages("maps")
+#install.packages("maptools")
+#install.packages("sp")
+#install.packages("spdep")
+#install.packages("gstat")
+#install.packages("splancs")
+#install.packages("spatstat")
+#install.packages("lattice")
+#install.packages("pgirmess")
+#install.packages("RColorBrewer")
+#install.packages("classInt")
+#install.packages("spgwr")
+#install.packages("leaflet")
+
+
+library(maps)         ## Projections
+library(maptools)     ## Data management
+library(sp)           ## Data management
+library(spdep)        ## Spatial autocorrelation
+library(gstat)        ## Geostatistics
+library(splancs)      ## Kernel Density
+library(spatstat)     ## Geostatistics
+#library(pgirmess)     ## Spatial autocorrelation        <<<Error: required 'rgdal'>>> 
+library(RColorBrewer) ## Visualization
+library(classInt)     ## Class intervals
+library(spgwr)        ## GWR
+
+# load some data:
+#url <- url("http://www.people.fas.harvard.edu/~zhukov/Datasets.RData")
+#load(url)
+#save(laos,crime,cities,volcano,election,dat88,mat88,file="Datasets.RData")
+```
+for comprehensive description of spatial packeges see CRAN's [Spatial Task View](https://cran.r-project.org/web/views/Spatial.html)
+
+`Spatial` objects:
+ 
+1. `Spatial*` has two slots. The first is a bounding box, a matrix of numerical coordinates with column names `c(‘min’, ‘max’)`, and at least two rows, with the first row eastings (x-axis) and the second northings (y-axis).
+
+2. `CRS` - coordinate reference system class, gets character string as its only slot value, which may be a missing value. If it is not missing, it should be a PROJ.4-format string describing the projection (more details are given in Sect. 4.1.2). For geographical coordinates, the simplest such string is "+proj=longlat".
+
+
+```{r}
+m <- matrix(c(0,0,1,1), 
+            ncol = 2,
+            dimnames = list(NULL, c("min", "max")))
+crs <- CRS(projargs = as.character(NA))
+crs
+S <- Spatial(bbox = m, proj4string = crs)
+S
+```
+
+using standard `read.table`:
+
+```{r}
+url1 <- "http://www.asdar-book.org/datasets/CRAN051001a.txt"
+CRAN_df <- read.table(url1, header = T)
+CRAN_mat <- cbind(CRAN_df$long, CRAN_df$lat)
+row.names(CRAN_mat) <- 1:nrow(CRAN_mat)
+summary(CRAN_mat)
+```
+
+### `SpatialPoints` object:
+
+```{r}
+llCRS <- CRS("+proj=longlat +ellps=WGS84")
+CRAN_sp <- SpatialPoints(CRAN_mat, proj4string = llCRS)
+summary(CRAN_sp)
+```
+
+the summary gives min+max values for coordinates.
+
+Methods
+
+The `bbox` method returns the bounding box of the object, and is used both for preparing plotting methods (see Chap.3) and internally in handling data objects
+
+```{r}
+bbox(CRAN_sp)
+```
+
+**SpatialPointsDataFrame**
+
+The SpatialPointsDataFrame class is the container for this kind of spatial point information, and can be constructed in a number of ways, for example from a data frame and a matrix of coordinates
+
+The `Spatial*DataFrame` classes have been designed to behave as far as possible like data frames
+
+the `match.ID` argument is set to its default value of TRUE, then the matrix row names are checked against the row names of the data frame
+
+```{r}
+CRAN_spdf1 <- SpatialPointsDataFrame(CRAN_mat, CRAN_df,
+                                     proj4string = llCRS,
+                                     match.ID = TRUE)
+head(CRAN_spdf1)
+```
+
+*Example:* creating a SpatialPointsDataFrame
+
+we converte the data.frame to SpatialPointsDataFrame when calling the `coordinates` function
+
+```{r}
+url2 <- "http://www.asdar-book.org/datasets/seamap105_mod.csv"
+turtle_df <- read.csv(url2)
+timestamp <- as.POSIXlt(strptime(as.character(turtle_df$obs_date),
+                                 "%m/%d/%Y %H:%M:%S"), "GMT")
+turtle_df1 <- data.frame(turtle_df, timestamp = timestamp)
+turtle_df1$lon <- ifelse(turtle_df1$lon < 0, turtle_df1$lon + 360, turtle_df1$lon)
+turtle_sp <- turtle_df1[order(turtle_df1$timestamp), ]
+# turtle_sp is still a data.frame
+
+coordinates(turtle_sp) <- c("lon", "lat")
+# now turlte_sp is a SpatialPointsDataFrame
+
+proj4string(turtle_sp) <- CRS("+proj=longlat +ellps=WGS84")
+```
+
+
+### `SpatialLines` 
+
+*Example:* SpatialLines and maptools
+
+```{r}
+library(maps)
+japan <- map("world", "japan", plot = F)
+p4s <- CRS("+proj=longlat +ellps=WGS84")
+
+library(maptools)
+SLjapan <- map2SpatialLines(japan, proj4string = p4s)
+str(SLjapan, max.level = 2)
+
+plot(SLjapan)
+```
+
+A very typical way of exploring the contents of these objects is to use lapply or sapply in combination with `slot`
+
+```{r}
+Lines_len <- sapply(slot(SLjapan, "lines"), 
+                    function(x) length(slot(x,"Lines")))
+table(Lines_len)
+```
+
+no `Lines` object contains more than one `Line` object:
+
+converting data to SpatialLinesDataFrame using `CcontourLines2SLDF` function:
+
+consider the `volcano` data:
+```{r}
+image(volcano)
+volcano_sl <- ContourLines2SLDF(contourLines(volcano))
+t(slot(volcano_sl, "data"))
+```
+
+
+### `SpatialPolygons`
+
+Start with an example:
+```{r}
+url3 <- "http://www.asdar-book.org/datasets/auckland_mapgen.dat"
+llCRS <- CRS("+proj=longlat +ellps=WGS84")
+auck_shore <- MapGen2SL(url3, llCRS)
+summary(auck_shore)
+
+lns <- slot(auck_shore, "lines")
+table(sapply(lns, function(x) length(slot(x, "Lines"))))
+
+islands_auck <- sapply(lns, function(x) {
+        crds <- slot(slot(x, "Lines")[[1]], "coords")
+        identical(crds[1, ], crds[nrow(crds), ])
+        })
+table(islands_auck)
+```
+
+Since all the Lines in the auck_shore object contain only single Line objects, checking the equality of the first and last coordinates of the first Line object in each Lines object tells us which sets of coordinates can validly be made into polygons. 
+
+The Polygon class extends the Line class by adding slots needed for polygons and checking that the first and last coordinates are identical.
+The extra slots are:
+- a label point, taken as the centroid of the polygon
+- the area of the polygon in the metric of the coordinates
+- whether the polygon is declared as a hole or not – the default value is a logical NA
+- the ring direction of the polygon
+
+*Example:* build a SpatialPolygons object
+```{r}
+islands_sl <- auck_shore[islands_auck]
+list_of_Lines <- slot(islands_sl, "lines")
+islands_sp <- SpatialPolygons(lapply(list_of_Lines, function(x) {
+        Polygons(list(Polygon(slot(slot(x, "Lines")[[1]],
+                           "coords"))), ID = slot(x, "ID"))
+        }), proj4string = CRS("+proj=longlat +ellps=WGS84"))
+
+summary(islands_sp)
+slot(islands_sp, "plotOrder")
+order(sapply(slot(islands_sp, "polygons"), 
+             function(x) slot(x, "area")), decreasing = TRUE)
+
+```
+
+As we saw with the construction of SpatialLines objects from raw
+coordinates, here we build a list of Polygon objects for each Polygons object,
+corresponding to a single identifying tag. A list of these Polygons objects is
+then passed to the SpatialPolygons function, with a coordinate reference
+system, to create the SpatialPolygons object. Again, like SpatialLines
+objects, SpatialPolygons objects are most often created by functions that
+import or manipulate such data objects, and seldom from scratch.
+
+**SpatialPolygonsDataFrame**
+
+*Example:* merging US state data with state boundary polygons
+```{r}
+library(maps)
+state.map <- map("state", plot = F, fill = T)
+IDs <- sapply(strsplit(state.map$names, ":"), function(x) x[1])
+library(maptools)
+state.sp <- map2SpatialPolygons(state.map, IDs = IDs,
+                                proj4string = CRS("+proj=longlat +ellps=WGS84"))
+plot(state.sp)
+```
+
+Then we can use identifying tag matching to suit the rows of the data frame to the SpatialPolygons. Here, we subset to the matched rows of the data frame, to ensure that one row corresponds to each Polygons object, to achieve one-to-one matching:
+
+```{r}
+url4 <- "http://www.asdar-book.org/datasets/state.sat.data_mod.txt"
+sat <- read.table(url4, row.names = 5, header = T)
+id <- match(row.names(sat), row.names(state.sp))
+row.names(sat)[is.na(id)]
+sat1 <- sat[!is.na(id), ]
+
+state.spdf <- SpatialPolygonsDataFrame(state.sp, sat1)
+slot(state.spdf, "data")
+```
+
+
+### `SpatialGrid` and `SpatialPixel` Objects
+
+*Example:* making a GridTopology object
+
+```{r}
+#TODO
+```
+
+
+# Visualising Spatial Data
+
+A major pleasure in working with spatial data is their visualisation.
+
+This chapter introduces the plotting methods for objects inheriting from class Spatial that are provided by package sp.
+
+## Traditional Plot System
+
+### Plotting Points, Lines, Polygons, and Grids
+
+*Example:* creating spatial objects from data.frame objects from the sp package 
+```{r}
+library(sp)
+data("meuse")
+class(meuse)
+head(meuse)
+
+# converting to Spatial object:
+coordinates(meuse) <- c("x","y")
+class(meuse)
+
+plot(meuse, main = "points")
+```
+
+The SpatialPointsDataFrame object used is created from a data.frame
+provided with sp, and the plot method shows the points with the default
+symbol.
+```{r}
+cc <- coordinates(meuse)
+m.sl <- SpatialLines(list(Lines(list(Line(cc)), "line1")))
+
+plot(m.sl, main = "lines")
+```
+
+A SpatialLines object is made by joining up the points in sequence, and
+plot draws the resulting zig-zags.
+```{r}
+data("meuse.riv")
+meuse.lst <- list(Polygons(list(Polygon(meuse.riv)), "meuse.riv"))
+meuse.pol <- SpatialPolygons(meuse.lst)
+
+plot(meuse.pol, col = "grey", main ="grid")
+```
+
+Grid:
+```{r}
+data("meuse.grid")
+coordinates(meuse.grid) <- c("x","y")
+meuse.grid <- as(meuse.grid, "SpatialPixels")
+image(meuse.grid, col = "grey", main = "grid")
+```
+
+A map becomes more readable when we combine several elements. We can display elements from those created above by using the `add = TRUE` argument in function calls:
+```{r}
+image(meuse.grid, col = "lightgrey")
+plot(meuse.pol, col = "grey", add = T)
+plot(meuse, pch = 11 ,col = "blue", add = T)
+```
+
+### Axes and Layout Elements
+
+*Example:*some notes about plotting and axes:
+```{r}
+oldpar = par(no.readonly = TRUE) # set oldpar
+layout(matrix(c(1, 2), 1, 2))
+plot(meuse, axes = TRUE, cex = 0.6)
+plot(meuse.pol, add = TRUE)
+title("Sample locations")
+par(mar = c(0, 0, 0, 0) + 0.1)
+plot(meuse, axes = FALSE, cex = 0.6)
+plot(meuse.pol, add = TRUE)
+box()
+par(oldpar)
+```
+
+This table summerises the SP DataFrame classes
+
+|Class(es)  	          |Argument |Meaning		   |Further help    |
+|-------------------------|---------|----------------------|----------------|
+|SpatialLinesDataFrame    |`col`    |Colour 		   |`?lines`        |
+|			  |`lwd`    |Line width            |`?lines`        |
+|			  |`lty`    |Line type 	           |`?lines`        |
+|                                                                           |
+|SpatialPolygonsDataFrame |`border` |Border colour 	   |`?polygon`      |
+|			  |`density`|Hashing density 	   |`?polygon`	    |
+|			  |`angle`  |Hashing angle 	   |`?polygon`	    |
+|			  |`lty`    |Line type 		   |`?polygon`	    |
+|		          |`pbg`    |Hole colour	   |	            |
+|                                                                           |
+|SpatialPointsDataFrame   |`pch`    |Symbol 		   |`?points`	    |
+|			  |`col`    |Colour 		   |`?points`	    |
+|			  |`bg`     |Fill colour 	   |`?points`	    |
+|			  |`cex`    |Symbol size 	   |`?points`	    |
+|                                                                           |
+|SpatialPixelsDataFrame   |`zlim`   |Attribute value limits|`?image.default`|
+|                                                                           |
+|and 			  |`col`    |Colours     	   |`?image.default`|
+|                                                                           |
+|SpatialGridDataFrame     |`breaks` |Break points          |`?image.default`|
+
+### Plotting Attributes and Map Legends
+
+*Example:* `image` methods for objects of class `SpatialPixelsDataFrame` and `SpatialGridDataFrame`
+```{r}
+library(gstat)
+zn.idw <- krige(log(zinc) ~ 1, meuse, meuse.grid)
+
+grays = gray.colors(4, 0.55, 0.95)
+image(zn.idw, col = grays, breaks = log(c(100, 200, 400, 800, 1800)))
+
+plot(meuse.pol, add = TRUE)
+plot(meuse, pch = 1, cex = sqrt(meuse$zinc)/20, add = TRUE)
+legVals <- c(100, 200, 500, 1000, 2000)
+legend("left", legend = legVals, pch = 1, pt.cex = sqrt(legVals)/20,
+       bty = "n", title = "measured")
+legend("topleft", legend = c("100-200", "200-400", "400-800","800-1800"),
+       fill = grays, bty = "n", title = "interpolated")
+```
+
+
+## Plotting with **ssplot**
+
+```{r}
+library(lattice)
+zn <- krige(zinc~1,meuse,meuse.grid)
+zn$direct <- zn$var1.pred
+zn$log <- exp(krige(log(zinc)~1,meuse,meuse.grid)$var1.pred)
+
+# traditional:
+levelplot(z ~ x + y | name,
+          spmap.to.lev(zn[c("direct","log")]),
+          asp = "iso")
+
+# with spplot:
+spplot(zn[c("direct","log")])
+```
+
+*Example:* `SpatialLinesDataFrame` with `contourLines` function and `spplot` (using `maptools`)
+```{r}
+data(meuse.grid)
+coordinates(meuse.grid) <- c("x", "y")
+meuse.grid <- as(meuse.grid, "SpatialPixelsDataFrame")
+im <- as.image.SpatialGridDataFrame(meuse.grid["dist"])
+cl <- ContourLines2SLDF(contourLines(im))
+spplot(cl)
+```
+
+
+*Example:* Adding Reference and Layout Elements to Plots with `spplot`
+```{r}
+river <- list("sp.polygons", meuse.pol)
+north <- list("SpatialPolygonsRescale",
+              layout.north.arrow(),
+              offset = c(178750, 332500),
+              scale = 400)
+
+scale <- list("SpatialPolygonsRescale",
+              layout.scale.bar(),
+              offset = c(180200, 329800), 
+              scale = 1000, 
+              fill = c("transparent","black"))
+
+txt1 <- list("sp.text", c(180200, 329950), "0")
+txt2 <- list("sp.text", c(181200, 329950), "1 km")
+
+pts <- list("sp.points",
+            meuse,
+            pch = 3, col = "black")
+
+meuse.layout <- list(river, north, scale, txt1, txt2, pts)
+
+spplot(zn["log"], sp.layout = meuse.layout)
+```
+
+
+## Plotting with **latticeExtra**
+
+*Example:* latticeExtra 
+```{r}
+library(latticeExtra)
+p = spplot(meuse["zinc"])
+m = SpatialPolygonsDataFrame(meuse.pol,
+                             data.frame(col = 1),
+                             match.ID = FALSE)
+l = spplot(m)
+l + p
+p + l
+```
+
+
+## Interactive Plots
+
+(this can not be demonstrated in the pdf version)
+
+*Example:* interactive with `base` 
+```{r, eval=F}
+plot(meuse)
+region <- locator(type = "o")
+n <- length(region$x)
+p <- Polygon(cbind(region$x, region$y)[c(1:n, 1), ],
+             hole = FALSE)
+ps <- Polygons(list(p), ID = "region")
+sps <- SpatialPolygons(list(ps))
+plot(meuse[sps, ], pch = 16, cex = 0.5, add = TRUE)
+```
+
+*Example:* interactive with `spplot`
+To select points with spplot, use: `identify = T` in the `spplot` function
+
+Digitising can be done by the function grid.locator from package grid, which underlies the functionality in lattice. A single point is selected by:
+```{r, eval=F}
+library(grid)
+trellis.focus("panel", column = 1, row = 1)
+as.numeric(grid.locator())
+trellis.unfocus()
+```
+
+**note** aboute choosing class intervals: Fisher-Jenks natural breaks is a better option than quantiles.
+
+
+## Some more Visualisation exercises
+
+This exercises are mostly based on the Harvard workshop: Applied Spatial Statistics in R. 
+```{r}
+rm(list=ls())
+url <- url("http://www.people.fas.harvard.edu/~zhukov/Datasets.RData")
+load(url) #might takes some time
+ls()
+```
+
+*Example:* point data - crime database. (using Traditional Plot System)
+```{r}
+head(crime)
+dim(crime)
+```
+
+First, we convert the crime dataframe into a SpatialDataFrame 
+```{r}
+proj <- CRS("+proj=utm +zone=17 +datum=WGS84")
+crime.sp <- SpatialPointsDataFrame(coords = cbind(crime$LONG, crime$LAT),
+                                   data = crime,
+                                   proj4string = proj)
+```
+
+bounding box of data points:
+```{r}
+bbox(crime.sp)
+```
+
+Plot points:
+```{r}
+plot(crime.sp, pch = 16, cex = 0.5, axes = T)
+```
+
+
+*Example: polygon data* : 2004 US election + crime. (using Traditional Plot System)
+
+The election data is already in class: SpatialPolygonDataFrame
+```{r}
+class(election)
+names(election)
+dim(election)
+
+election.sp <- election
+```
+
+Lambert Conformal Conic Projection:
+```{r}
+proj4string(election.sp) <- CRS("+proj=lcc+lon_0=90w +lat_1=20n +lat_2=60n")
+summary(election.sp)[1:4]
+```
+
+plot basemap of counties:
+```{r}
+par(mar = c(0,0,0,0))
+plot(election)
+```
+
+basemap + crime
+```{r}
+par(mar=rep(0.5,4))
+plot(election,
+     xlim=bbox(crime.sp)[1,], # defining the zoom with bbox
+     ylim=bbox(crime.sp)[2,],
+     col="beige")
+plot(crime.sp,pch=1, cex=.5,add=T, col="blue")
+
+```
+
+*Example: ploting some attributes* : 2004 US election + crime. (using Traditional Plot System)
+
+Firs let's check the **RColorBrewer** package options:
+```{r}
+par(mar=c(0,3,0,0),cex=.6)
+display.brewer.all(n=5) 
+
+# Create blue-state red-state palette
+br.palette <- colorRampPalette(c("blue", "red"), space = "rgb")
+br.palette(5)
+```
+
+plot the % of vote for Bush
+
+here are two plotting options:
+
+**Easy but unflexible option**
+```{r}
+bush <- election$Bush_pct
+
+spplot(election, 
+       zcol = "Bush_pct",
+       col.regions = br.palette(100), 
+       main = "Percent of County Vote for Bush (2004)")
+```
+
+**Harder but more flexible option:** Using `classInt` package.
+```{r}
+pal <- br.palette(n=5) # Define number of colors in a palette
+
+# Fixed intervals:
+classes_fx <- classIntervals(bush, n=5, style = "fixed",
+                             fixedBreaks=c(0,10,25,50,75,100), rtimes = 1)
+# Other methods:
+classes_sd <- classIntervals(bush, n=5, style = "sd", rtimes = 1)
+classes_fi <- classIntervals(bush, n=5, style = "fisher", rtimes = 3)
+classes_eq <- classIntervals(bush, n=5, style = "equal", rtimes = 1)
+classes_km <- classIntervals(bush, n=5, style = "kmeans", rtimes = 1)
+classes_qt <- classIntervals(bush, n=5, style = "quantile", rtimes = 1)
+
+# Compare classes before plotting
+par(mar=c(2,2,2,1)+0.1, mfrow=c(2,3))
+plot(classes_fx, pal=pal, main="Fixed Intervals", xlab="", ylab="")
+plot(classes_sd, pal=pal, main="Standard Deviation", xlab="", ylab="")
+plot(classes_fi, pal=pal, main="Fisher-Jenks", xlab="", ylab="")
+plot(classes_km, pal=pal, main="K Means", xlab="", ylab="")
+plot(classes_eq, pal=pal, main="Equal Interval", xlab="", ylab="")
+plot(classes_qt, pal=pal, main="Quantile", xlab="", ylab="")
+
+par(mfrow = c(2,1))
+# Plot using fixed intervals
+cols <- findColours(classes_fx, pal) # this is a classInt function
+
+par(mar=rep(0,4))
+plot(election, col = cols, border=NA)
+legend(x = "bottom", cex = 0.7, fill = attr(cols, "palette"),
+       bty = "n", legend = names(attr(cols, "table")),
+       title = "Percent of County Vote for Bush (2004)", ncol=5)
+
+# Plot binary Bush/Kerry (Red/Blue)
+cols <- ifelse(election.sp$Bush > election.sp$Kerry,"red","blue")
+
+plot(election, col = cols, border = NA)
+legend(x = "bottom", cex= 0.7, fill = c("red","blue"),
+       bty = "n", legend = c("Bush","Kerry"),
+       title = "Winner of County Vote (2004)", ncol=2)
+```
+
+*Example:* Grid data: Maunga Whau Volcano. (using also: `contour` and 3D plot with `persp` package)
+```{r}
+# the volcano data:
+class(volcano)
+dim(volcano)
+
+z <- volcano            ## Height Variable
+x <- 10*(1:nrow(z))     ## 10 Meter Spacing (S-N)
+y <- 10*(1:ncol(z))     ## 10 Meter Spacing (E-W)
+
+# Gradient + Contour plot:
+image(x, y, z, col=terrain.colors(100), axes=F)
+contour(x, y, z, levels=seq(from=min(z), to=max(z), by=10),axes=F, add=T)
+
+
+# 3D Plot:
+## 3-D Elevation Plot w/ color
+z <- 2 * volcano
+x <- 10 * (1:nrow(z))
+y <- 10 * (1:ncol(z))
+
+## Create new grid
+z0 <- min(z) - 20 
+z <- rbind(z0, cbind(z0, z, z0), z0) 
+x <- c(min(x) - 1e-10, x, max(x) + 1e-10) 
+y <- c(min(y) - 1e-10, y, max(y) + 1e-10) 
+
+## Create matrix of base colors
+fcol <- matrix("green3", nr = nrow(z)-1, nc = ncol(z)-1) 
+fcol[ , i2 <- c(1,ncol(fcol))] <- "gray" 
+fcol[i1 <- c(1,nrow(fcol)) , ] <- "gray" 
+
+## Take average of four neighboring values for palette
+zi <- (volcano[ -1,-1] + volcano[ -1,-61] + volcano[-87,-1] + volcano[-87,-61])/4
+pal <- terrain.colors(20)[cut(zi, quantile(zi, seq(0,1, len = 21)), include.lowest = TRUE)]
+fcol[-i1,-i2] <- pal
+
+## Plot it
+par(mar=rep(0,4))
+persp(x, y, z, 
+      theta=120, phi=15, col = fcol, scale = FALSE, shade = 0.4, border = NA)
+
+# another way - plotly package
+# this can be viewed only in html version
+# library(plotly)
+# plot_ly(z = ~volcano, type = "surface")
+```
+
+
+# Spatial Data Import and Export
+
+TODO
+
+
+# Analysing Spatial Data
+
+Cressie (1993) spatial statistic classification:
+- Spatial Point Pattern Data
+- Interpolation and Geostatistical Data
+- Lattice Data (areal data)
+
+before moving to specific Spatial Statistic area we start by introducing some spatial statistic concepts.
+
+preliminaries: distance conversion function () and load data
+```{r}
+km2d <- function(km){ # convert km to degrees
+out <- (km/1.852)/60
+return(out)
+}
+
+d2km <- function(d){ # convert degrees to km
+out <- d*60*1.852
+return(out)
+}
+
+spdf <- election # a SpatialPolygonsDataFrame object
+map_crd <- coordinates(spdf)
+```
+
+
+## Spatial Autocorrelation
+
+this spatial topic can be best explored with the **spdep** package for Spatial autocorrelation analysis. 
+
+more on this package from the package CRAN page:
+
+A collection of functions to create spatial weights matrix objects from polygon contiguities, from point patterns by distance and tessellations, for summarizing these objects, and for permitting their use in spatial data analysis, including regional aggregation by minimum spanning tree; a collection of tests for spatial autocorrelation, including global Moran's I, APLE, Geary's C, Hubert/Mantel general cross product statistic, Empirical Bayes estimates and Assunção/Reis Index, Getis/Ord G and multicoloured join count statistics, local Moran's I and Getis/Ord G, saddlepoint approximations and exact tests for global and local Moran's I; and functions for estimating spatial simultaneous autoregressive (SAR) lag and error models, impact measures for lag models, weighted and unweighted SAR and CAR spatial regression models, semi-parametric and Moran eigenvector spatial filtering, GM SAR error models, and generalized spatial two stage least squares models.
+
+
+contiguity neighbors:
+```{r}
+W_cont_el <- poly2nb(spdf, queen = T)
+W_cont_el_mat <- nb2listw(W_cont_el,
+                          style = "W",
+                          zero.policy = TRUE)
+```
+
+
+### plot the connections:
+```{r}
+par(mar=rep(0,4))
+plot(W_cont_el_mat, 
+     coords = map_crd,
+     pch = 19, cex = 0.1, col = "gray")
+```
+
+### Global Autocorrelation tests
+
+**Moran's I:**
+
+the Moran's I coefficient calculates the ratio between the product of the variable of interest and its spatial lag, with the product of the variable of interest, adjusted for the spatial weights used. 
+$$ I =  \frac   {n}
+                {\sum_{i=1}^{n}\sum_{j=1}^{n}w_{ij}}
+        \frac   {\sum_{i=1}^{n}\sum_{j=1}^{n}w_{ij}(y_i-\bar{y})(y_j-\bar{y})}
+                {\sum_{i=1}^{n}(y_i-\bar{y})^2}$$
+note that I range from –1 (perfect dispersion) to +1 (perfect correlation). A zero value indicates a random spatial pattern
+
+```{r}
+moran.test(spdf$Bush_pct,
+           listw = W_cont_el_mat,
+           zero.policy = T)
+```
+
+**Geary's C:**
+The Geary’s C uses the sum of squared differences between pairs of
+data values as its measure of covariation.
+
+$$C =   \frac   {(n-1)\sum _{i}\sum _{j}w_{ij}(y_{i}-y_{j})^{2}}
+                {2W\sum _{i}(y_{i}-{\bar {y}})^{2}}$$
+Where $W$ is the sum of all $w_{ij}$
+
+```{r}
+geary.test(spdf$Bush_pct, listw=W_cont_el_mat, zero.policy=T)
+```
+
+**Join Count:**
+When the variable of interest is categorical, a join count analysis can be used to assess the degree of clustering or dispersion
+
+```{r}
+spdf$BushWin <- as.factor(ifelse(spdf$Bush > spdf$Kerry,1,0))
+joincount.multi(spdf$BushWin, listw=W_cont_el_mat, zero.policy=T)
+```
+
+
+### Local Autocorrelation
+
+It is possible to break Global measures down into their components, to construct local tests for spatial autocorrelation.
+
+Moran Scatterplot: (note: we use the "W_cont_el_mat" wight matrix we clalculated before)
+```{r}
+par(mar=c(4,4,1.5,0.5))
+moran.plot(spdf$Bush_pct, listw = W_cont_el_mat, zero.policy=T,
+           xlim = c(0,100), ylim = c(0,100), 
+           pch = 16, col = "black",cex = 0.5, quiet=F,
+           labels = as.character(spdf$NAME), 
+           xlab = "Percent for Bush", 
+           ylab="Percent for Bush (Spatial Lag)",
+           main="Moran Scatterplot")
+```
+
+The plot is partitioned into four quadrants: low-low, low-high, high-low and high-high
+
+**Local Moran's I Plot** (normality assumption)
+```{r}
+lm1 <- localmoran(spdf$Bush_pct, listw = W_cont_el_mat, zero.policy = T)
+
+spdf$lm1 <- lm1[,4] ## Extract z-scores
+
+lm.palette <- colorRampPalette(c("red","white","blue","blue4"), space = "rgb")
+spplot(spdf, zcol="lm1", 
+       col.regions = lm.palette(20),
+       main = "Local Moran's I", pretty = T)
+```
+
+## Spatial Weights
+
+
+
+## Point Pattern Analysis
+
+
+
+## Geostatistics
+
+we will cover:
+- Interpolation with Inverse-distance weighted (IDW)
+- The variogram 
+- Kringing
+
+and more topics in the future
+
+start with exploring the Laos Dataset
+
+```{r}
+# subset of Laos bombing dataset:
+df <- laos[sample(500, replace = F),]
+str(df) #data.frame object
+```
+
+open simple world map and create coordinates matrix:
+```{r}
+data("wrld_simpl")
+sp_point <- cbind(LONG = jitter(df$LONG, 0.001),
+                  LAT = jitter(df$LAT, 0.001))
+```
+
+create SpatialPointsDataFrame object and plot it:
+```{r}
+df.sp <- SpatialPointsDataFrame(coords = sp_point, data = df,
+            proj4string = CRS("+proj=utm +zone=48 +datum=WGS84"))
+
+par(mar = rep(0,4))
+plot(df.sp, pch = 1, cex = log(df.sp$LOAD_LBS)/5)
+```
+
+zoom in:
+
+```{r}
+par(mar=c(2,2,0.5,0.5))
+plot(wrld_simpl,
+     xlim = bbox(df.sp)[1,] + c(-1,1),
+     ylim = bbox(df.sp)[2,] + c(-2,2),
+     col = "lightgrey", axes = T) ## World Map
+points(df.sp, pch = 16,cex = .5, col = "red")
+```
+
+bubble plot: PAYLOAD variable:
+```{r}
+bubble(df.sp,"LOAD_LBS", col = "red")
+```
+
+### Variogram cloud
+
+A variogram cloud is a scatterplot of data pairs, in which the
+semivariance is plotted against interpoint distance
+
+```{r}
+plot(variogram(log(LOAD_LBS)~1,
+               locations = coordinates(sp_point),
+               data = df.sp, cloud = T)
+     ,pch=16, cex=0.5)
+```
+
+Upper left corner: point pairs are close together, but have
+very different values.
+Lower left corner: close together, similar values.
+Upper right corner: far apart, different values.
+Lower right corner: far apart, similar values.
+A variogram can also be used to identify outliers...
+
+## Sample Variogram:
+
+```{r}
+plot(variogram(log(LOAD_LBS)~1,
+               locations = coordinates(sp_point),
+               data = df.sp, cloud = F),
+     type = "b", pch=16)
+```
+
+## Identify outlying pairs (in html verssion):
+
+```{r, eval = F}
+sel <- plot(variogram(LOAD_LBS ~ 1,
+                      locations = coordinates(sp_point),
+                      data = df.sp,
+                      alpha = c(0,45,90,135), cloud = T),
+            pch = 16, cex = 1, digitize = T,col = "blue")
+plot(sel,df.sp)
+```
+
+Find the outlying pairs in the dataset
+
+```{r, eval = F}
+sel
+
+out.pair <- function(x,data,sel){
+	a <- as.data.frame(data[sel$head,as.character(x)])
+	b <- as.data.frame(data[sel$tail,as.character(x)])
+	ID.a <- round(as.numeric(rownames(as.data.frame(data[sel$head,]))),0)
+	ID.b <- round(as.numeric(rownames(as.data.frame(data[sel$tail,]))),0)
+	out <- cbind(ID.a,a[,as.character(x)],ID.b,b[,as.character(x)])
+	colnames(out) <- c("ID.a",paste(x,".a",sep=""),"ID.b",paste(x,".b",sep=""))
+	out
+	}
+
+out.pair(x="LOAD_LBS",data=df.sp,sel=sel)
+
+```
+
+
+
+
+
+
+
+
+
